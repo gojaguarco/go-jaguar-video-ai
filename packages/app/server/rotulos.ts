@@ -90,7 +90,10 @@ export async function renderRotulos(opts: { origin: string; slug: string; w: num
     return { frames: n, guardados: escritos }
   } finally {
     try { ws?.close() } catch { /* ya cerrado */ }
+    // Windows no deja borrar archivos que Chromium aún tiene abiertos (EBUSY en CrashpadMetrics-active.pma): se espera a que el proceso
+    // salga y se reintenta; si aun así falla, la carpeta temporal se queda (la limpia el sistema) en vez de tumbar el servidor con un rechazo sin atender.
+    const salio = proc.exitCode !== null || proc.signalCode !== null ? Promise.resolve() : new Promise<void>(r => { proc.once('exit', () => r()); setTimeout(r, 5000) })
     proc.kill('SIGKILL')
-    void fsp.rm(profile, { recursive: true, force: true })
+    void salio.then(() => fsp.rm(profile, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 })).catch(() => { /* carpeta temporal: no importa */ })
   }
 }

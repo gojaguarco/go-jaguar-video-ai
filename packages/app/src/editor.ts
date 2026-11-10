@@ -1,5 +1,5 @@
 import {
-  CLIP_COLOR_DEFAULT, CLIP_TRANSFORM_DEFAULT, Store, describe, formatoDe, duration, exec, execBatch, layout, locate, parseProject, serialize, sincronizarPalabras,
+  CLIP_COLOR_DEFAULT, CLIP_TRANSFORM_DEFAULT, Store, describe, formatoDe, duration, exec, execBatch, layout, locate, overlayEnd, parseProject, serialize, sincronizarPalabras,
   TRANSITION_DEFAULTS, TRANSITION_KINDS, setAlComando, verificar, ZOOM_DEFAULTS, ZOOM_KINDS, type AssetInfo, type Cmd, type TransitionKind, type ZoomKind, type Project, type TextLayer,
 } from '@gojaguar/core'
 import { TRANSITION_INFO, ZOOM_INFO } from './fxinfo'
@@ -253,10 +253,21 @@ export async function bootEditor(slug: string) {
   }
   $('undo').onclick = () => store.undo()
   $('redo').onclick = () => store.redo()
-  const splitHere = () => { if (store.project.tracks?.main?.locked) { notify('La pista principal está bloqueada'); return } exec(store, { op: 'split', at: player.playhead }) }
+  /** Clip superpuesto (video o audio) seleccionado bajo el cabezal: S, Q y W actúan sobre él en vez de sobre la pista principal. */
+  const ovSel = () => {
+    const s = store.selection; if (s?.type !== 'overlay') return null
+    const o = store.project.overlays?.find(x => x.id === s.id), t = player.playhead
+    if (!o || store.project.tracks?.[(o.kind === 'video' ? 'v' : 'a') + o.track]?.locked) return null
+    return t > o.start + 0.01 && t < overlayEnd(o) - 0.01 ? o : null
+  }
+  const splitHere = () => {
+    const o = ovSel(); if (o) { exec(store, { op: 'split_overlay', id: o.id, at: player.playhead }); return }
+    if (store.project.tracks?.main?.locked) { notify('La pista principal está bloqueada'); return } exec(store, { op: 'split', at: player.playhead })
+  }
   $('split').onclick = splitHere
   /** Como CapCut: borra de un clip todo lo anterior (Q) o lo posterior (W) al cabezal y cierra el hueco. */
   const trimHere = (lado: 'antes' | 'despues') => {
+    const o = ovSel(); if (o) { exec(store, { op: 'trim_overlay', id: o.id, lado, at: player.playhead }); return }      // superpuesto seleccionado: se recorta él
     if (store.project.tracks?.main?.locked) { notify('La pista principal está bloqueada'); return }
     const t = player.playhead, c = layout(store.project).find(x => t > x.start + 0.01 && t < x.end - 0.01)
     if (!c) { notify('Pon el cabezal dentro de un clip'); return }
@@ -468,6 +479,32 @@ export async function bootEditor(slug: string) {
     }
     if (cur) { const b = document.createElement('button'); b.textContent = 'Quitar transición'; b.className = 'danger'; b.onclick = () => { exec(store, { op: 'set_transition', clip: clipId, transition: null }); closeCutMenu() }; m.append(b) }
     m.insertAdjacentHTML('beforeend', '<p class="hint">Duración e intensidad: selecciona uno de los dos clips.</p>')
+    document.body.append(m); cutMenu = m
+    const w = m.offsetWidth, h = m.offsetHeight
+    m.style.left = Math.min(Math.max(8, cx - w / 2), window.innerWidth - w - 8) + 'px'
+    m.style.top = Math.max(8, cy - h - 8) + 'px'
+  }
+  // --- esquinas de un clip superpuesto: transición (video) o fundido del audio (audio) ---------------------------
+  tl.onOverlayCorner = (id, lado, cx, cy) => {
+    closeCutMenu()
+    const o = store.project.overlays?.find(x => x.id === id); if (!o) return
+    const m = document.createElement('div'); m.className = 'cutmenu'
+    const boton = (label: string, on: boolean, fn: () => void, danger = false) => {
+      const b = document.createElement('button'); b.textContent = label; if (on) b.classList.add('on'); if (danger) b.className = 'danger'
+      b.onclick = () => { fn(); closeCutMenu() }; m.append(b)
+    }
+    if (o.kind === 'video') {
+      m.innerHTML = '<h4>Transición de la toma</h4>'
+      const opts: [string, 'fundido' | 'subir' | '3d'][] = [['Fundido', 'fundido'], ['Subir (flota hacia arriba)', 'subir'], ...(o.mascara ? [['Giro 3D (card)', '3d'] as [string, '3d']] : [])]
+      for (const [label, k] of opts) boton(label, o.transicion === k, () => exec(store, { op: 'update_overlay', id, patch: { transicion: k } }))
+      if (o.transicion) boton('Quitar transición', false, () => exec(store, { op: 'update_overlay', id, patch: { transicion: null } }), true)
+      m.insertAdjacentHTML('beforeend', '<p class="hint">La misma transición se usa al entrar y al salir de la toma.</p>')
+    } else {
+      const actual = o.fundido?.[lado] ?? 0
+      m.innerHTML = `<h4>Fundido de ${lado === 'entrada' ? 'entrada' : 'salida'} del audio</h4>`
+      for (const d of [0.5, 1, 2, 3]) boton(`${String(d).replace('.', ',')} s`, Math.abs(actual - d) < 0.01, () => exec(store, { op: 'update_overlay', id, patch: { fundido: { [lado]: d } } }))
+      if (actual) boton('Sin fundido', false, () => exec(store, { op: 'update_overlay', id, patch: { fundido: { [lado]: 0 } } }), true)
+    }
     document.body.append(m); cutMenu = m
     const w = m.offsetWidth, h = m.offsetHeight
     m.style.left = Math.min(Math.max(8, cx - w / 2), window.innerWidth - w - 8) + 'px'

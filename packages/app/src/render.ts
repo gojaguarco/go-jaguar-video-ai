@@ -12,7 +12,7 @@ export async function bootRender(slug: string, outW: number, outH: number) {
   const project = parseProject(await (await fetch(`/api/proyectos/${slug}/proyecto`)).text())
   setCanvasSize(project.format)
   const { W, H } = await import('./constants')
-  await Promise.all(['900', '800', '700', '600'].map(w => document.fonts.load(`${w} 40px Figtree`)))
+  await Promise.all([...['900', '800', '700', '600'].map(w => document.fonts.load(`${w} 40px Figtree`)), document.fonts.load('900 40px Montserrat')])
   await preloadOverlayImages(project)
   const cv = document.createElement('canvas'); cv.width = outW; cv.height = outH; document.body.append(cv)
   const ctx = cv.getContext('2d')!

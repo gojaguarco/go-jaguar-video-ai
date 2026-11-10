@@ -2,7 +2,7 @@ import type { SelItem } from '@gojaguar/core'
 import { PEAK_RATE, THUMB_H, THUMB_W } from './media'
 import { TRANSITION_INFO, ZOOM_INFO } from './fxinfo'
 import type { Player } from './player'
-import { MIN_DUR, clipDur, compactTracks, duration, exec, freeTrack, isTextLayer, layout, overlayDur, overlayEnd, trackCount, type OverlayClip, type Placed, type Store, type TextLayer } from '@gojaguar/core'
+import { MIN_DUR, acomodarTextos, clipDur, compactTracks, duration, exec, freeTextTrack, freeTrack, isTextLayer, pistaTexto, textTrackCount, layout, overlayDur, overlayEnd, trackCount, type OverlayClip, type Placed, type Store, type TextLayer } from '@gojaguar/core'
 
 const LEFT = 98, RULER_H = 26
 /** Botones de la cabecera de cada pista (centros en x): bloquear, ocultar y silenciar, como en CapCut. */
@@ -16,6 +16,8 @@ const ROWS: Record<'subtitle' | 'graphic' | 'video' | 'music', Row> = {
   music: { y: 186, h: 40, label: 'Música' },
 }
 const EDGE = 7
+/** Alto de la franja de la onda (abajo) donde arrastrar = volumen: en los clips de audio y en los de video superpuestos. Arriba se selecciona, mueve y recorta. */
+const WAVE_A = 16, WAVE_V = 12, HEAD_OV = 14, CORNER = 16
 const INK = '#b3aea2', HOVER = '#ffffff', DIM = '#6f6a60', ACTIVE = '#35c2b5'   // iconos normales y activos (bloqueado / oculto / silenciado)
 const tc = (t: number) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`
 
@@ -24,7 +26,7 @@ type Drag =
   | { k: 'trim'; edge: 'in' | 'out'; id: string; x0: number; in0: number; out0: number; start0: number }
   | { k: 'clip'; id: string; x0: number; moved: boolean; target: number; start0: number; up: boolean; track: number }
   | { k: 'ovc'; id: string; mode: 'move' | 'l' | 'r'; x0: number; start0: number; in0: number; out0: number }
-  | { k: 'ov'; id: string; mode: 'move' | 'l' | 'r'; x0: number; s0: number; e0: number; moved: boolean }
+  | { k: 'ov'; id: string; mode: 'move' | 'l' | 'r'; x0: number; s0: number; e0: number; moved: boolean; palabras0?: string }
   | { k: 'marquee'; x0: number; y0: number; moved: boolean; base: SelItem[] }
   | { k: 'gain'; type: 'clip' | 'overlay' | 'music'; id: string; y0: number; v0: number }
 
@@ -41,6 +43,9 @@ export class Timeline {
   private height = 234
   /** Tipo de pista con una pista vacía extra visible (solo mientras se arrastra: así se puede soltar en una pista nueva). */
   private extra: 'video' | 'audio' | null = null
+  /** Pistas de subtítulos y de gráficos (la 1 abajo, las secundarias encima), y la pista extra vacía que se ve al arrastrar un texto. */
+  private tLanes: Record<'subtitle' | 'graphic', Row[]> = { subtitle: [], graphic: [] }
+  private extraTexto: 'subtitle' | 'graphic' | null = null
   private hoverIcon = ''     // botón de cabecera bajo el mouse ('main:lock'…)
   private mouse = { x: 0, y: 0 }
   /** Corte al que el cabezal quedó "pegado" (imán), para dibujar la guía. */
@@ -48,6 +53,8 @@ export class Timeline {
   private hoverCut: string | null = null      // clip cuyo corte de entrada está bajo el mouse (sin transición)
   /** Lo llama al tocar el corte entre dos clips (el editor abre el menú de transición). */
   onCutClick: (clipId: string, clientX: number, clientY: number) => void = () => {}
+  /** Clic en una esquina superior de un clip superpuesto: transición (video) o fundido (audio) de su entrada o su salida. */
+  onOverlayCorner: (overlayId: string, lado: 'entrada' | 'salida', clientX: number, clientY: number) => void = () => {}
 
   constructor(private canvas: HTMLCanvasElement, private store: Store, private player: Player) {
     this.ctx = canvas.getContext('2d')!
@@ -112,8 +119,8 @@ export class Timeline {
   private rowList() {
     type R = { key: string; y: number; h: number; type: 'text' | 'video' | 'audio'; eye: boolean; mute: boolean }
     const out: R[] = [
-      { key: 'subtitle', ...ROWS.subtitle, type: 'text', eye: true, mute: false },
-      { key: 'graphic', ...ROWS.graphic, type: 'text', eye: true, mute: false },
+      ...this.tLanes.subtitle.map((r): R => ({ key: 'subtitle', ...r, type: 'text', eye: true, mute: false })),
+      ...this.tLanes.graphic.map((r): R => ({ key: 'graphic', ...r, type: 'text', eye: true, mute: false })),
       ...this.vLanes.map((r, i): R => ({ key: `v${i + 1}`, ...r, type: 'video', eye: true, mute: true })),
       { key: 'main', ...ROWS.video, type: 'video', eye: true, mute: true },
       { key: 'music', ...ROWS.music, type: 'audio', eye: false, mute: true },
@@ -152,9 +159,14 @@ export class Timeline {
     const nv = trackCount(p, 'video') + (this.extra === 'video' ? 1 : 0), na = trackCount(p, 'audio') + (this.extra === 'audio' ? 1 : 0)
     let y = 30
     // las filas de texto solo se ven si hay subtítulos / gráficos (como las pistas superpuestas: nada de filas vacías)
-    const hasSub = p.layers.some(l => l.type === 'subtitle'), hasGfx = p.layers.some(l => l.type === 'graphic')
-    ROWS.subtitle.h = hasSub ? 26 : 0; ROWS.subtitle.y = y; if (hasSub) y += 30
-    ROWS.graphic.h = hasGfx ? 26 : 0; ROWS.graphic.y = y; if (hasGfx) y += 32
+    // una fila por pista de texto (como las de video): la 1 abajo, las secundarias encima; ROWS.<tipo> abarca todas
+    for (const tipo of ['subtitle', 'graphic'] as const) {
+      const n = textTrackCount(p, tipo) + (this.extraTexto === tipo ? 1 : 0), R = ROWS[tipo]
+      R.y = y; this.tLanes[tipo] = []
+      for (let k = n; k >= 1; k--) { this.tLanes[tipo][k - 1] = { y, h: 26, label: k === 1 ? R.label : `${R.label} ${k}` }; y += 30 }
+      R.h = n ? y - R.y - 4 : 0
+      if (n && tipo === 'graphic') y += 2
+    }
     this.vLanes = []
     for (let k = nv; k >= 1; k--) { this.vLanes[k - 1] = { y, h: 46, label: `Video ${k + 1}` }; y += 50 }
     ROWS.video.y = y; y += ROWS.video.h + 6
@@ -180,6 +192,13 @@ export class Timeline {
     if (kind === 'video') return y < lanes[lanes.length - 1].y ? lanes.length : 1
     return y > lanes[lanes.length - 1].y ? lanes.length : 1
   }
+  /** Pista de texto (1, 2…) bajo la altura `y`; por encima de la más alta devuelve la siguiente (para abrir una pista nueva). */
+  private laneAtTexto(y: number, tipo: 'subtitle' | 'graphic'): number {
+    const lanes = this.tLanes[tipo]
+    for (let i = 0; i < lanes.length; i++) if (y >= lanes[i].y - 2 && y < lanes[i].y + lanes[i].h + 2) return i + 1
+    if (!lanes.length) return 1
+    return y < lanes[lanes.length - 1].y ? lanes.length + (this.extraTexto === tipo ? 0 : 1) : 1
+  }
   /** Clip superpuesto bajo el mouse en su pista. */
   private hitOverlayClip(x: number, y: number, kind: 'video' | 'audio'): { o: OverlayClip; zone: 'l' | 'r' | 'move' } | null {
     const lanes = kind === 'video' ? this.vLanes : this.aLanes
@@ -198,10 +217,12 @@ export class Timeline {
     }
     return null
   }
-  private hitOverlay(x: number, kind: 'subtitle' | 'graphic'): { o: TextLayer; zone: 'l' | 'r' | 'move' } | null {
+  private hitOverlay(x: number, y: number, kind: 'subtitle' | 'graphic'): { o: TextLayer; zone: 'l' | 'r' | 'move' } | null {
     const list = this.store.project.layers.filter(isTextLayer).filter(o => o.type === kind)
     for (let i = list.length - 1; i >= 0; i--) {
-      const o = list[i], x0 = this.t2x(o.start), x1 = this.t2x(o.end)
+      const o = list[i], R = this.tLanes[kind][pistaTexto(o) - 1]
+      if (!R || y < R.y || y >= R.y + R.h) continue
+      const x0 = this.t2x(o.start), x1 = this.t2x(o.end)
       if (x >= x0 && x <= x1) return { o, zone: x - x0 < EDGE ? 'l' : x1 - x < EDGE ? 'r' : 'move' }
     }
     return null
@@ -237,14 +258,15 @@ export class Timeline {
       if (h && h.zone === 'body' && y >= V.y + V.h - WAVE) return { type: 'clip', id: h.p.clip.id, vol: h.p.clip.volume, rect: { x0: this.t2x(h.p.start), x1: this.t2x(h.p.end), y: V.y + V.h - WAVE, h: WAVE } }
       return null
     }
-    if (row === 'alane') {
-      const h = this.hitOverlayClip(x, y, 'audio'), R = h && this.aLanes[h.o.track - 1]
-      if (h && R && h.zone === 'move' && !this.locked(this.laneKey(h.o))) return { type: 'overlay', id: h.o.id, vol: h.o.volume, rect: { x0: this.t2x(h.o.start), x1: this.t2x(overlayEnd(h.o)), y: R.y, h: R.h } }
+    if (row === 'alane' || row === 'vlane') {
+      const kind = row === 'alane' ? 'audio' : 'video', h = this.hitOverlayClip(x, y, kind), R = h && (kind === 'audio' ? this.aLanes : this.vLanes)[h.o.track - 1]
+      const WAVE = kind === 'audio' ? WAVE_A : WAVE_V
+      if (h && R && h.zone === 'move' && y >= R.y + R.h - WAVE && !this.locked(this.laneKey(h.o)) && !this.player.images.has(h.o.assetId)) return { type: 'overlay', id: h.o.id, vol: h.o.volume, rect: { x0: this.t2x(h.o.start), x1: this.t2x(overlayEnd(h.o)), y: R.y + R.h - WAVE, h: WAVE } }
       return null
     }
     if (row === 'music' && p.music && !this.locked('music')) {
       const R = ROWS.music, x0 = this.t2x(0), x1 = this.t2x(this.total())
-      if (x > x0 + EDGE && x < x1 - EDGE) return { type: 'music', id: 'music', vol: p.music.volume, rect: { x0, x1, y: R.y, h: R.h } }
+      if (x > x0 + EDGE && x < x1 - EDGE && y >= R.y + R.h - WAVE_A) return { type: 'music', id: 'music', vol: p.music.volume, rect: { x0, x1, y: R.y + R.h - WAVE_A, h: WAVE_A } }
     }
     return null
   }
@@ -366,6 +388,13 @@ export class Timeline {
     if (row === 'vlane' || row === 'alane') {
       const h = this.hitOverlayClip(x, y, row === 'vlane' ? 'video' : 'audio')
       if (!h || this.locked(this.laneKey(h.o))) { this.startMarquee(x, y, e); return }
+      const R = (h.o.kind === 'video' ? this.vLanes : this.aLanes)[h.o.track - 1], ox0 = this.t2x(h.o.start), ox1 = this.t2x(overlayEnd(h.o))
+      if (R && y < R.y + HEAD_OV && ox1 - ox0 > CORNER * 3 && (x - ox0 < CORNER || ox1 - x < CORNER)) {
+        this.store.select({ type: 'overlay', id: h.o.id })
+        const r = this.canvas.getBoundingClientRect(), lado = x - ox0 < CORNER ? 'entrada' : 'salida'
+        this.onOverlayCorner(h.o.id, lado, r.left + (lado === 'entrada' ? ox0 : ox1), r.top + R.y)
+        return
+      }
       this.store.select({ type: 'overlay', id: h.o.id })
       this.store.beginTx()
       this.drag = { k: 'ovc', id: h.o.id, mode: h.zone, x0: x, start0: h.o.start, in0: h.o.srcIn, out0: h.o.srcOut }
@@ -373,11 +402,12 @@ export class Timeline {
     }
 
     if (row === 'subtitle' || row === 'graphic') {
-      const h = this.hitOverlay(x, row)
+      const h = this.hitOverlay(x, y, row)
       if (!h) { this.store.select(null); this.player.seek(t); this.drag = { k: 'seek' }; return }
       this.store.select({ type: 'layer', id: h.o.id })
       this.store.beginTx()
-      this.drag = { k: 'ov', id: h.o.id, mode: h.zone, x0: x, s0: h.o.start, e0: h.o.end, moved: false }
+      this.drag = { k: 'ov', id: h.o.id, mode: h.zone, x0: x, s0: h.o.start, e0: h.o.end, moved: false, palabras0: h.o.props?.palabras }
+      if (h.zone === 'move') this.extraTexto = row      // se ve una pista vacía encima para poder abrir otra arrastrando
       return
     }
     this.startMarquee(x, y, e)
@@ -507,8 +537,18 @@ export class Timeline {
           const sn = this.snap(s, d.id), en = this.snap(s + len, d.id)
           s = Math.abs(sn - s) <= Math.abs(en - (s + len)) ? sn : en - len
           o.start = Math.max(0, s); o.end = o.start + len
-        } else if (d.mode === 'l') o.start = Math.min(this.snap(Math.max(0, d.s0 + dt), d.id), o.end - 0.1)
-        else o.end = Math.max(this.snap(d.e0 + dt, d.id), o.start + 0.1)
+          // imán de pista: la que está bajo el mouse si cabe; si no, la secundaria libre más cercana; si ninguna, una nueva. Nunca una detrás de otra.
+          const tipo = o.type as 'subtitle' | 'graphic', tr = freeTextTrack(pr, tipo, o.start, o.end, this.laneAtTexto(y, tipo), o.id)
+          if (tr === 1) delete o.track; else o.track = tr
+          // el karaoke guarda el tiempo de cada palabra en la línea de tiempo: se mueven con la capa para no desincronizarse
+          const pr0 = d.palabras0, props = (o as { props?: Record<string, string> }).props
+          if (pr0 && props) try { const k = o.start - d.s0; props.palabras = JSON.stringify((JSON.parse(pr0) as [string, number, number][]).map(([w, a, b]) => [w, +(a + k).toFixed(3), +(b + k).toFixed(3)])) } catch { /* sin palabras */ }
+        } else {
+          if (d.mode === 'l') o.start = Math.min(this.snap(Math.max(0, d.s0 + dt), d.id), o.end - 0.1)
+          else o.end = Math.max(this.snap(d.e0 + dt, d.id), o.start + 0.1)
+          const tipo = o.type as 'subtitle' | 'graphic', tr = freeTextTrack(pr, tipo, o.start, o.end, pistaTexto(o), o.id)     // si al estirarlo pisa a otro, sube de pista
+          if (tr === 1) delete o.track; else o.track = tr
+        }
       })
     }
   }
@@ -524,6 +564,7 @@ export class Timeline {
       this.marquee = null; this.dirty = true
       if (!d.moved) { if (!d.base.length) this.store.select(null); this.player.seek(this.magnet(Math.min(this.x2t(d.x0), this.total()))) }      // solo un clic en el hueco
     }
+    if (d.k === 'ov') { this.extraTexto = null; this.store.live(pr => acomodarTextos(pr)) }      // sin pistas vacías ni textos superpuestos
     if (d.k === 'trim' || d.k === 'ov' || d.k === 'ovc' || d.k === 'gain') this.store.endTx()
     if (d.k === 'clip') this.extra = null
     if (d.k === 'clip' && d.moved && d.up) {
@@ -553,9 +594,9 @@ export class Timeline {
   private onDbl(e: MouseEvent) {
     const { x, y } = this.pos(e)
     const row = this.rowAt(y)
-    if ((row === 'subtitle' || row === 'graphic') && x >= LEFT && !this.hitOverlay(x, row)) {
+    if ((row === 'subtitle' || row === 'graphic') && x >= LEFT && !this.hitOverlay(x, y, row)) {
       const t = this.x2t(x)
-      exec(this.store, { op: 'add_text', type: row, start: t, end: t + 2.5, text: row === 'subtitle' ? 'Nuevo subtítulo' : 'Nuevo gráfico' })
+      exec(this.store, { op: 'add_text', type: row, start: t, end: t + 2.5, text: row === 'subtitle' ? 'Nuevo subtítulo' : 'Nuevo gráfico', track: this.laneAtTexto(y, row) })
     }
   }
 
@@ -586,7 +627,7 @@ export class Timeline {
       return h ? (h.zone === 'body' ? 'grab' : 'ew-resize') : 'default'
     }
     if (row === 'subtitle' || row === 'graphic') {
-      const h = this.hitOverlay(x, row)
+      const h = this.hitOverlay(x, y, row)
       return h ? (h.zone === 'move' ? 'grab' : 'ew-resize') : 'cell'
     }
     if (row === 'vlane' || row === 'alane') {
@@ -611,9 +652,8 @@ export class Timeline {
       if (px > w - 60) this.scrollX += px - (w - 60)
     }
 
-    for (const k of Object.keys(ROWS) as (keyof typeof ROWS)[]) {
-      c.fillStyle = '#232321'; c.fillRect(LEFT, ROWS[k].y, w - LEFT, ROWS[k].h)
-    }
+    for (const k of ['video', 'music'] as const) { c.fillStyle = '#232321'; c.fillRect(LEFT, ROWS[k].y, w - LEFT, ROWS[k].h) }
+    for (const r of [...this.tLanes.subtitle, ...this.tLanes.graphic]) { c.fillStyle = '#232321'; c.fillRect(LEFT, r.y, w - LEFT, r.h) }
     for (const r of [...this.vLanes, ...this.aLanes]) { c.fillStyle = '#212120'; c.fillRect(LEFT, r.y, w - LEFT, r.h) }
     this.drawRuler()
 
@@ -884,11 +924,12 @@ export class Timeline {
       const w = Math.max(x1 - x0, 2), a = this.player.assets.get(o.assetId)
       const sel = this.store.isSelected('overlay', o.id), grupo = this.store.multi.length > 0
       const name = this.store.asset(o.assetId)?.name ?? o.id
+      const im0 = o.kind === 'video' ? this.player.images.get(o.assetId) : undefined
       c.save(); c.globalAlpha = (o.kind === 'video' ? this.ts(this.laneKey(o)).hidden : this.ts(this.laneKey(o)).muted) ? 0.4 : 1
       c.beginPath(); c.roundRect(x0, R.y, w, R.h, 3); c.clip()
       c.font = '10px Figtree, system-ui, sans-serif'; c.textBaseline = 'middle'
       if (o.kind === 'video') {
-        const HEAD = 14, TH = R.h - HEAD
+        const HEAD = HEAD_OV, TH = R.h - HEAD - (im0 ? 0 : WAVE_V)
         c.fillStyle = '#0d4f53'; c.fillRect(x0, R.y, w, R.h)
         const im = this.player.images.get(o.assetId)
         if (im) {      // imagen fija: la misma foto repetida a lo largo del clip (recortada al centro)
@@ -903,8 +944,23 @@ export class Timeline {
             if (th) c.drawImage(th, tx, R.y + HEAD, tw, TH)
           }
         }
+        if (!im0) {      // su audio, abajo (como en la pista principal): arrastrar ahí = volumen
+          const yb = R.y + R.h - WAVE_V, pk = a?.peaks
+          c.fillStyle = '#0a3b3e'; c.fillRect(x0, yb, w, WAVE_V)
+          if (pk) {
+            c.fillStyle = o.volume > 0 ? '#35c2b5' : 'rgba(53,194,181,.35)'
+            for (let x = Math.max(Math.floor(x0), LEFT); x < Math.min(x1, this.w); x++) {
+              const t = o.srcIn + ((x - x0) / this.pps) * o.speed, i0 = Math.floor(t * PEAK_RATE), i1 = Math.max(i0 + 1, Math.floor((t + o.speed / this.pps) * PEAK_RATE))
+              let mx = 0; for (let i = i0; i < i1 && i < pk.length; i++) if (pk[i] > mx) mx = pk[i]
+              const hh = Math.max(1, Math.min(1, mx * o.volume) * (WAVE_V - 3)); c.fillRect(x, yb + WAVE_V - 1.5 - hh, 1, hh)
+            }
+          }
+          if (o.volume <= 0) { c.fillStyle = 'rgba(255,255,255,.55)'; c.fillText('sin sonido', Math.max(x0, LEFT) + 6, yb + WAVE_V / 2) }
+        }
         c.fillStyle = '#0f6a6f'; c.fillRect(x0, R.y, w, HEAD)
-        c.fillStyle = '#fff'; c.fillText(`${name}  ${tc(overlayDur(o))}`, Math.max(x0, LEFT) + 6, R.y + HEAD / 2)
+        const TRANS: Record<string, string> = { fundido: 'Fundido', subir: 'Subir', '3d': 'Giro 3D' }
+        c.fillStyle = '#fff'; c.fillText(`${name}  ${tc(overlayDur(o))}${o.transicion ? `  · ${TRANS[o.transicion] ?? o.transicion}` : ''}`, Math.max(x0, LEFT) + CORNER + 4, R.y + HEAD / 2)
+        this.drawCorners(o, x0, x1, R.y, !!o.transicion, !!o.transicion)
       } else {
         c.fillStyle = '#143a66'; c.fillRect(x0, R.y, w, R.h)
         const pk = this.player.musicPeaks.get(o.assetId)
@@ -916,7 +972,14 @@ export class Timeline {
             const h = Math.min(1, mx * o.volume) * (R.h - 14); c.fillRect(x, mid - h / 2, 1, Math.max(h, 1))
           }
         }
-        c.fillStyle = '#fff'; c.fillText('♪ ' + name, Math.max(x0, LEFT) + 6, R.y + 8)
+        // fundidos: rampa oscura al inicio / al final (su ancho = duración del fundido)
+        const fi = (o.fundido?.entrada ?? 0) * this.pps / o.speed, fo = (o.fundido?.salida ?? 0) * this.pps / o.speed
+        c.fillStyle = 'rgba(0,0,0,.45)'
+        if (fi > 0) { c.beginPath(); c.moveTo(x0, R.y); c.lineTo(x0 + fi, R.y); c.lineTo(x0, R.y + R.h); c.closePath(); c.fill() }
+        if (fo > 0) { c.beginPath(); c.moveTo(x1, R.y); c.lineTo(x1 - fo, R.y); c.lineTo(x1, R.y + R.h); c.closePath(); c.fill() }
+        c.fillStyle = 'rgba(255,255,255,.08)'; c.fillRect(x0, R.y + R.h - WAVE_A, w, 1)      // la franja de abajo es el volumen
+        c.fillStyle = '#fff'; c.fillText('♪ ' + name, Math.max(x0, LEFT) + CORNER + 4, R.y + 8)
+        this.drawCorners(o, x0, x1, R.y, !!o.fundido?.entrada, !!o.fundido?.salida)
       }
       c.restore()
       if (sel) {
@@ -924,6 +987,18 @@ export class Timeline {
         if (grupo) { c.fillStyle = 'rgba(255,255,255,.12)'; c.fillRect(x0 + 1, R.y + 1, w - 2, R.h - 2) }
         else { c.fillStyle = '#fff'; for (const xx of [x0 + 1, x1 - 7]) { c.beginPath(); c.roundRect(xx, R.y + R.h / 2 - 9, 6, 18, 3); c.fill() } }
       }
+    }
+  }
+
+  /** Esquinas superiores de un superpuesto: botón de transición (video) o de fundido (audio) de su entrada y su salida; relleno = aplicada. */
+  private drawCorners(o: OverlayClip, x0: number, x1: number, y: number, ent: boolean, sal: boolean) {
+    if (x1 - x0 <= CORNER * 3) return
+    const c = this.ctx
+    for (const [cx, on] of [[x0 + CORNER / 2, ent], [x1 - CORNER / 2, sal]] as const) {
+      if (cx < LEFT || cx > this.w) continue
+      c.save(); c.translate(cx, y + HEAD_OV / 2); c.rotate(Math.PI / 4)
+      c.fillStyle = on ? '#fff' : 'rgba(0,0,0,.35)'; c.strokeStyle = '#fff'; c.lineWidth = 1.2
+      c.beginPath(); c.rect(-3.5, -3.5, 7, 7); c.fill(); c.stroke(); c.restore()
     }
   }
 
@@ -953,7 +1028,7 @@ export class Timeline {
   }
 
   private drawOverlay(o: TextLayer) {
-    const c = this.ctx, R = ROWS[o.type]
+    const c = this.ctx, R = this.tLanes[o.type][pistaTexto(o) - 1] ?? ROWS[o.type]
     const x0 = this.t2x(o.start), x1 = this.t2x(o.end)
     if (x1 < LEFT || x0 > this.w) return
     const sel = this.store.selection?.type === 'layer' && this.store.selection.id === o.id

@@ -4,7 +4,11 @@ import { cajaEscena, dibujarEscena } from './escenas'
 import { PLANTILLAS_NUEVAS, cajaPlantilla, dibujarPlantillaNueva } from './plantillas'
 
 const ease = (x: number) => 1 - Math.pow(1 - Math.min(Math.max(x, 0), 1), 3)
-const FONT = (o: TextLayer) => `700 ${o.size}px Figtree, "Segoe UI", system-ui, sans-serif`
+/** Fuente de un subtítulo/rótulo simple: Figtree 700 por defecto; `props.fuente` (p. ej. 'Montserrat', que solo trae peso 900) y `props.peso` la cambian. */
+const FONT = (o: TextLayer) => {
+  const f = o.props?.fuente, peso = o.props?.peso ?? (f === 'Montserrat' ? '900' : '700')
+  return `${peso} ${o.size}px ${f ? `"${f}", ` : ''}Figtree, "Segoe UI", system-ui, sans-serif`
+}
 
 export interface Rect { x: number; y: number; w: number; h: number }
 
@@ -28,6 +32,24 @@ const clamp01 = (x: number) => Math.min(Math.max(x, 0), 1)
 const easeOut3 = (x: number) => 1 - Math.pow(1 - clamp01(x), 3)
 const easeBack = (x: number) => { const c1 = 1.70158, c3 = c1 + 1, v = clamp01(x); return 1 + c3 * Math.pow(v - 1, 3) + c1 * Math.pow(v - 1, 2) }
 const FONT_BRAND = (px: number, w = 900) => `${w} ${px}px Figtree, "Segoe UI", system-ui, sans-serif`
+
+/**
+ * Frase "palabra a palabra": UNA capa karaoke por frase (fácil de mover y editar) con `props.modo = 'palabra'`, que muestra solo la palabra que se
+ * está diciendo, con la fuente, tamaño, color y posición de la capa (como un subtítulo normal). Los tiempos salen de `props.palabras`.
+ */
+export const esPalabra = (o: TextLayer) => o.type === 'subtitle' && o.template === 'karaoke' && o.props?.modo === 'palabra'
+/** Palabra visible en `t`: la última que empezó, hasta que empieza la siguiente (como mucho 0,35 s después de terminar, para no dejarla en un silencio largo). */
+export function palabraActiva(o: TextLayer, t: number): string | null {
+  let ps: [string, number, number][] = []
+  try { ps = JSON.parse(o.props?.palabras ?? '[]') } catch { return null }
+  for (let i = ps.length - 1; i >= 0; i--) {
+    const [w, a, b] = ps[i]
+    if (t < a) continue
+    const sig = ps[i + 1]?.[1] ?? Infinity
+    return t < Math.min(sig, Math.max(b, a + 0.12) + 0.35) ? w : null
+  }
+  return null
+}
 
 /** Medidas del karaoke en reposo (mismas fórmulas que drawKaraoke): ancho de la línea más larga y número de líneas. */
 function karaokeMedidas(ctx: CanvasRenderingContext2D, o: TextLayer) {
@@ -57,6 +79,15 @@ export function boundsOf(ctx: CanvasRenderingContext2D, o: TextLayer): Rect {
     const pw = tw + size * 1.6, ph = size * 1.75
     return { x: W / 2 - pw / 2, y: H * 0.105 - ph / 2, w: pw, h: ph }
   }
+  if (esPalabra(o)) {      // caja de la palabra más ancha de la frase, en su posición (se mueve como un subtítulo normal)
+    let ps: [string, number, number][] = []
+    try { ps = JSON.parse(o.props?.palabras ?? '[]') } catch { /* sin palabras */ }
+    ctx.save(); ctx.font = FONT(o)
+    const tw = Math.max(o.size, ...ps.map(p => ctx.measureText(p[0]).width))
+    ctx.restore()
+    const w = tw + o.size * 0.4, h = o.size * 1.3
+    return { x: o.transform.x * W - w / 2, y: o.transform.y * H - h / 2, w, h }
+  }
   if (o.type === 'subtitle' && o.template === 'karaoke') {
     const m = karaokeMedidas(ctx, o), w = m.w + m.size * 0.4, h = m.n * m.lh
     return { x: W / 2 - w / 2, y: H * 0.8 - h / 2, w, h }
@@ -77,7 +108,7 @@ export interface Geom { b: Rect; D: Pt; F: Pt; rot: number; sx: number; sy: numb
 /** Margen invisible que respeta la posición INICIAL de lo que entra a pantalla (fracción del ancho / alto); el usuario puede pasarse a mano. */
 export const MARGEN_X = 0.05, MARGEN_Y = 0.03
 /** Plantillas: se dibujan en su lugar por defecto y `transform.x/y` = 0,5 significa "ahí"; mover suma un desplazamiento. */
-const esPlantilla = (o: TextLayer) => (o.type === 'subtitle' && o.template === 'karaoke') || (o.type === 'graphic' && ['lanzamiento', 'glass', 'pildora', 'escena', ...PLANTILLAS_NUEVAS].includes(o.template))
+const esPlantilla = (o: TextLayer) => (o.type === 'subtitle' && o.template === 'karaoke' && !esPalabra(o)) || (o.type === 'graphic' && ['lanzamiento', 'glass', 'pildora', 'escena', ...PLANTILLAS_NUEVAS].includes(o.template))
 const sinCambios = (t: TextLayer['transform']) => t.x === 0.5 && t.y === 0.5 && (t.scale ?? 1) === 1 && !t.rotation && (t.sx ?? 1) === 1 && (t.sy ?? 1) === 1
 
 export function geomOf(ctx: CanvasRenderingContext2D, o: TextLayer): Geom {
@@ -178,7 +209,7 @@ export function drawOverlays(ctx: CanvasRenderingContext2D, p: Project, t: numbe
     if (capa === 'frente' && esDetras(o)) continue
     const g = geomOf(ctx, o), b = g.b
     ctx.save(); aplicar(ctx, g)
-    if (o.type === 'subtitle' && o.template === 'karaoke') drawKaraoke(ctx, o, t)
+    if (o.type === 'subtitle' && o.template === 'karaoke' && !esPalabra(o)) drawKaraoke(ctx, o, t)
     else if (o.type === 'graphic' && o.template === 'glass') drawGlass(ctx, o, t)
     else if (o.type === 'graphic' && o.template === 'pildora') drawPildora(ctx, o, t)
     else if (o.type === 'graphic' && o.template === 'escena') dibujarEscena(ctx, o, t)
@@ -188,13 +219,16 @@ export function drawOverlays(ctx: CanvasRenderingContext2D, p: Project, t: numbe
       ctx.font = FONT(o)
       ctx.textBaseline = 'middle'
       if (o.type === 'subtitle') {
+        const txt = esPalabra(o) ? palabraActiva(o, t) : o.text       // frase "palabra a palabra": solo la que se está diciendo
         ctx.textAlign = 'center'
         ctx.lineJoin = 'round'
         ctx.lineWidth = o.size / 5
         ctx.strokeStyle = 'rgba(0,0,0,.9)'
-        ctx.strokeText(o.text, o.transform.x * W, o.transform.y * H)
-        ctx.fillStyle = o.color
-        ctx.fillText(o.text, o.transform.x * W, o.transform.y * H)
+        if (txt) {
+          ctx.strokeText(txt, o.transform.x * W, o.transform.y * H)
+          ctx.fillStyle = o.color
+          ctx.fillText(txt, o.transform.x * W, o.transform.y * H)
+        }
       } else {
         // Gráfico animado: la barra entra deslizando y sale con fade.
         const a = ease((t - o.start) / 0.45)

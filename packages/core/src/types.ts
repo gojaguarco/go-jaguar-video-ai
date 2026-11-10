@@ -81,6 +81,9 @@ interface LayerBase {
   start: number; end: number    // segundos de la línea de tiempo
   transform: Transform
   keyframes?: Keyframe[]        // reservado: aún no se renderiza
+  /** Pista de textos (subtítulos y gráficos, cada tipo con las suyas): 1 = la principal (ausente = 1). Dos capas del mismo tipo NUNCA se pisan en
+   *  la misma pista: si chocan, una pasa a otra pista donde quepa (o a una nueva). Ver `acomodarTextos` en timeline.ts. */
+  track?: number
 }
 
 /** Subtítulo. `template` 'karaoke' dibuja las palabras de `props.palabras` (JSON [[palabra,inicio,fin],…] en segundos de la línea de tiempo) resaltando la que se está diciendo. */
@@ -122,6 +125,9 @@ export interface OverlayClip {
    */
   mascara?: { x: number; y: number; w: number; aspect: number; r: number }
   blend?: 'screen'                // 'screen' suma la luz del clip al video de abajo (luces, destellos, humo): lo negro no se ve
+  color?: ClipColor               // luces y color (misma fórmula que los clips de la pista principal); ausente = sin corrección
+  /** Fundido del AUDIO al entrar y al salir, en segundos (música, efectos, voz de un superpuesto). Ausente = corte seco. */
+  fundido?: { entrada?: number; salida?: number }
 }
 
 /** Estado de una pista de la línea de tiempo. Claves: 'main', 'music', 'subtitle', 'graphic', 'v1','v2'… (video superpuesto) y 'a1','a2'… (audio extra). */

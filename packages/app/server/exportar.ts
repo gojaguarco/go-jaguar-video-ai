@@ -225,7 +225,7 @@ export async function buildExport(project: Project, root: string, opts: ExportOp
       const px = Math.round(mh * 0.1 / 2) * 2, py = Math.round(mh * 0.18 / 2) * 2, PW = mw + 2 * px, PH = mh + 2 * py, R = num(m.r * mw)
       const mx0 = m.x * W - mw / 2, my0 = m.y * H - mh / 2, st = num(o.start), dd = num(D + 0.1)
       const cr = o.crop ? `,crop=iw*${num(1 - o.crop.l - o.crop.r)}:ih*${num(1 - o.crop.t - o.crop.b)}:iw*${num(o.crop.l)}:ih*${num(o.crop.t)}` : ''
-      vf.push(`[${k}:v]setpts=(PTS-STARTPTS)/${num(o.speed)}+${st}/TB,fps=${fps}${cr},scale=w='trunc(min(${W}/iw,${H}/ih)*iw*${num(o.transform.scale)}/2)*2':h=-2,format=rgba[cc${j}]`)
+      vf.push(`[${k}:v]setpts=(PTS-STARTPTS)/${num(o.speed)}+${st}/TB,fps=${fps}${cr}${o.blend ? '' : colorChain(o.color)},scale=w='trunc(min(${W}/iw,${H}/ih)*iw*${num(o.transform.scale)}/2)*2':h=-2,format=rgba[cc${j}]`)
       vf.push(`color=c=black:s=${PW}x${PH}:r=${fps}:d=${dd},setpts=PTS-STARTPTS+${st}/TB,format=rgba[cb${j}]`)
       vf.push(`[cb${j}][cc${j}]overlay=x='${num(o.transform.x * W - mx0 + px)}-w/2':y='${num(o.transform.y * H - my0 + py)}-h/2':eof_action=repeat[cv${j}]`)
       const sd = `(hypot(max(abs(X-${PW / 2})-${num(mw / 2)}+${R},0),max(abs(Y-${PH / 2})-${num(mh / 2)}+${R},0))+min(max(abs(X-${PW / 2})-${num(mw / 2)}+${R},abs(Y-${PH / 2})-${num(mh / 2)}+${R}),0)-${R})`
@@ -255,11 +255,11 @@ export async function buildExport(project: Project, root: string, opts: ExportOp
       }
       const round = `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(gt(abs(X-W/2)-(W/2-${R}),0)*gt(abs(Y-H/2)-(H/2-${R}),0)*gt(hypot(abs(X-W/2)-(W/2-${R}),abs(Y-H/2)-(H/2-${R})),${R}),0,alpha(X,Y))'`
       const cr = o.crop ? `,crop=iw*${num(1 - o.crop.l - o.crop.r)}:ih*${num(1 - o.crop.t - o.crop.b)}:iw*${num(o.crop.l)}:ih*${num(o.crop.t)}` : ''
-      vf.push(`[${pack ? `pku${j}` : `${k}:v`}]setpts=(PTS-STARTPTS)/${num(o.speed)}+${num(o.start)}/TB,fps=${fps}${cr},scale=w='trunc(min(${W}/iw,${H}/ih)*iw*${num(o.transform.scale)}/2)*2':h=-2,format=rgba,${pack ? '' : round + ','}colorchannelmixer=aa=${num(o.transform.opacity)}${o.transicion ? `,fade=t=in:st=${num(o.start)}:d=0.35:alpha=1,fade=t=out:st=${num(Math.max(o.start, o.start + D - 0.3))}:d=0.3:alpha=1` : ''}${o.transform.rotation ? `,rotate=a=${num(o.transform.rotation * Math.PI / 180)}:ow='rotw(${num(o.transform.rotation * Math.PI / 180)})':oh='roth(${num(o.transform.rotation * Math.PI / 180)})':c=none` : ''}[ov${j}]`)
+      vf.push(`[${pack ? `pku${j}` : `${k}:v`}]setpts=(PTS-STARTPTS)/${num(o.speed)}+${num(o.start)}/TB,fps=${fps}${cr}${pack || o.blend ? '' : colorChain(o.color)},scale=w='trunc(min(${W}/iw,${H}/ih)*iw*${num(o.transform.scale)}/2)*2':h=-2,format=rgba,${pack ? '' : round + ','}colorchannelmixer=aa=${num(o.transform.opacity)}${o.transicion ? `,fade=t=in:st=${num(o.start)}:d=0.35:alpha=1,fade=t=out:st=${num(Math.max(o.start, o.start + D - 0.3))}:d=0.3:alpha=1` : ''}${o.transform.rotation ? `,rotate=a=${num(o.transform.rotation * Math.PI / 180)}:ow='rotw(${num(o.transform.rotation * Math.PI / 180)})':oh='roth(${num(o.transform.rotation * Math.PI / 180)})':c=none` : ''}[ov${j}]`)
       vf.push(`[${cur}][ov${j}]overlay=x='${num(W * o.transform.x)}-w/2':y='${num(H * o.transform.y)}-h/2${o.transicion === 'subir' ? `+${num(H * 0.025)}*pow(max(0,1-(t-${num(o.start)})/0.35),2)` : ''}':eof_action=pass:enable='between(t,${num(o.start)},${num(o.start + D)})'[b${j + 1}]`)
       cur = `b${j + 1}`
     }
-    if (!ts((o.kind === 'video' ? 'v' : 'a') + o.track).muted && o.volume > 0 && await hasAudio(vozO ?? file)) audio.push(`[${kaO}:a]asetpts=PTS-STARTPTS,${A_FMT},${atempoChain(o.speed)},volume=${num(o.volume)},atrim=0:${num(D)},adelay=${Math.round(o.start * 1000)}:all=1[ao${j}]`)
+    if (!ts((o.kind === 'video' ? 'v' : 'a') + o.track).muted && o.volume > 0 && await hasAudio(vozO ?? file)) audio.push(`[${kaO}:a]asetpts=PTS-STARTPTS,${A_FMT},${atempoChain(o.speed)},volume=${num(o.volume)},atrim=0:${num(D)}${o.fundido?.entrada ? `,afade=t=in:st=0:d=${num(o.fundido.entrada)}` : ''}${o.fundido?.salida ? `,afade=t=out:st=${num(Math.max(0, D - o.fundido.salida))}:d=${num(o.fundido.salida)}` : ''},adelay=${Math.round(o.start * 1000)}:all=1[ao${j}]`)
   }
 
   // 3) música

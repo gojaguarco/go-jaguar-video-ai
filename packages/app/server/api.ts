@@ -440,6 +440,7 @@ async function seleccionarEnProyecto(slug: string | null, ids: string[]) {
 }
 
 // --- diálogo nativo para elegir archivos (devuelve rutas reales: así no hace falta copiar nada) ----------------
+// Windows: el diálogo se abre con una ventana dueña TopMost ($o); sin ella queda DETRÁS del navegador y la app parece colgada.
 async function pickFiles(multiple: boolean, titulo: string, todo = false): Promise<string[]> {
   let r: { code: number; out: string }
   if (process.platform === 'darwin') {
@@ -449,7 +450,7 @@ async function pickFiles(multiple: boolean, titulo: string, todo = false): Promi
       'set AppleScript\'s text item delimiters to linefeed', 'return o as text']
     r = await run('osascript', lines.flatMap(l => ['-e', l]))
   } else if (process.platform === 'win32') {
-    r = await run('powershell', ['-NoProfile', '-Command', `Add-Type -AssemblyName System.Windows.Forms; $f=New-Object System.Windows.Forms.OpenFileDialog; $f.Title='${titulo.replace(/'/g, "''")}'; $f.Multiselect=$${multiple}; $f.Filter='${todo ? 'Material|*.mp4;*.mov;*.m4v;*.mkv;*.webm;*.avi;*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;*.jpg;*.jpeg;*.png;*.webp;*.avif;*.jfif;*.heic|Todos|*.*' : 'Videos|*.mp4;*.mov;*.m4v;*.mkv;*.webm;*.avi|Todos|*.*'}'; if($f.ShowDialog() -eq 'OK'){ $f.FileNames -join [char]10 }`])
+    r = await run('powershell', ['-NoProfile', '-Command', `Add-Type -AssemblyName System.Windows.Forms; $o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true}; $f=New-Object System.Windows.Forms.OpenFileDialog; $f.Title='${titulo.replace(/'/g, "''")}'; $f.Multiselect=$${multiple}; $f.Filter='${todo ? 'Material|*.mp4;*.mov;*.m4v;*.mkv;*.webm;*.avi;*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;*.jpg;*.jpeg;*.png;*.webp;*.avif;*.jfif;*.heic|Todos|*.*' : 'Videos|*.mp4;*.mov;*.m4v;*.mkv;*.webm;*.avi|Todos|*.*'}'; if($f.ShowDialog($o) -eq 'OK'){ $f.FileNames -join [char]10 }`])
   } else {
     r = await run('zenity', ['--file-selection', `--title=${titulo}`, ...(multiple ? ['--multiple', '--separator=\n'] : [])])
   }
@@ -464,7 +465,7 @@ async function pickFolder(titulo: string, inicial: string): Promise<string | nul
     r = await run('osascript', ['-e', 'tell me to activate', '-e', `set d to choose folder with prompt "${titulo.replace(/"/g, '')}" default location (POSIX file "${ini}")`, '-e', 'return POSIX path of d'])
     if (r.code !== 0) r = await run('osascript', ['-e', 'tell me to activate', '-e', `POSIX path of (choose folder with prompt "${titulo.replace(/"/g, '')}")`])
   } else if (process.platform === 'win32') {
-    r = await run('powershell', ['-NoProfile', '-Command', `Add-Type -AssemblyName System.Windows.Forms; $f=New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description='${titulo.replace(/'/g, "''")}'; $f.SelectedPath='${ini.replace(/'/g, "''")}'; if($f.ShowDialog() -eq 'OK'){ $f.SelectedPath }`])
+    r = await run('powershell', ['-NoProfile', '-Command', `Add-Type -AssemblyName System.Windows.Forms; $o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true}; $f=New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description='${titulo.replace(/'/g, "''")}'; $f.SelectedPath='${ini.replace(/'/g, "''")}'; if($f.ShowDialog($o) -eq 'OK'){ $f.SelectedPath }`])
   } else r = await run('zenity', ['--file-selection', '--directory', `--title=${titulo}`, `--filename=${ini}/`])
   const out = r.code === 0 ? r.out.trim().replace(/\/$/, '') : ''
   return out || null
@@ -555,14 +556,22 @@ function groupLines(words: { i: number; t0: number; w: string; t1: number }[]) {
 }
 
 async function transcribe(proxy: string, outPrefix: string, idioma: string) {
-  const wav = outPrefix + '.16k.wav'
+  // whisper-cli.exe (Windows) solo abre rutas con caracteres de la página de códigos del sistema: un nombre con tildes "de Mac"
+  // (o + U+0301), emojis, etc. llegaba como "?" → "input file not found" y la ayuda completa como error. Por eso Whisper trabaja
+  // SIEMPRE con un archivo temporal de nombre ASCII; ffmpeg y Node sí manejan bien cualquier nombre.
+  const tmp = path.join(os.tmpdir(), `gojaguar-${process.pid}-${Date.now().toString(36)}`)
+  const wav = tmp + '.16k.wav', json = tmp + '.whisper.json'
   const a = await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', proxy, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav])
   if (a.code !== 0) { await fsp.rm(wav, { force: true }); throw new Error('No pude extraer el audio') }
-  const w = await run('whisper-cli', ['-m', MODEL, '-f', wav, '-l', idioma, '-t', String(Math.max(2, os.cpus().length - 2)), '-ml', '1', '-sow', '-oj', '-of', outPrefix + '.whisper'])
+  const w = await run('whisper-cli', ['-m', MODEL, '-f', wav, '-l', idioma, '-t', String(Math.max(2, os.cpus().length - 2)), '-ml', '1', '-sow', '-oj', '-of', tmp + '.whisper'])
   await fsp.rm(wav, { force: true })
-  if (w.code !== 0) throw new Error('Whisper falló: ' + w.err.slice(-200))
-  const raw = await readJson<{ transcription: { text: string; offsets: { from: number; to: number } }[] }>(outPrefix + '.whisper.json', { transcription: [] })
-  await fsp.rm(outPrefix + '.whisper.json', { force: true })
+  if (w.code !== 0) {
+    await fsp.rm(json, { force: true })
+    const util = w.err.split(/\r?\n/).find(l => /^\s*error/i.test(l)) ?? w.err.trim().split(/\r?\n/).slice(-2).join(' ')     // la línea del error, no la ayuda
+    throw new Error('Whisper falló: ' + util.slice(0, 300))
+  }
+  const raw = await readJson<{ transcription: { text: string; offsets: { from: number; to: number } }[] }>(json, { transcription: [] })
+  await fsp.rm(json, { force: true })
   const words: { i: number; t0: number; t1: number; w: string }[] = []
   for (const s of raw.transcription) {
     const t = s.text.trim(); if (!t) continue

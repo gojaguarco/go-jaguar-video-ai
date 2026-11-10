@@ -32,7 +32,10 @@ const anota = (nombre, ok, nota = '', obligatorio = true) => { resultado.push({ 
 const extra = [BIN, ...(win ? [join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WinGet', 'Links'), 'C:\\Program Files\\nodejs'] : ['/opt/homebrew/bin', '/usr/local/bin'])]
 process.env.PATH = [...extra, process.env.PATH ?? ''].join(delimiter)
 
-const corre = (cmd, a, o = {}) => spawnSync(cmd, a, { encoding: 'utf8', shell: win, ...o })
+// En Windows se usa la shell (npm es un .cmd), y con shell Node junta los argumentos sin comillas:
+// `python -c import sys;print(...)` llegaba roto. Por eso se citan los que llevan espacios o símbolos.
+const cita = s => (win && /[\s"&|<>^;(),%]/.test(s) ? `"${String(s).replace(/"/g, '\\"')}"` : s)
+const corre = (cmd, a, o = {}) => win ? spawnSync(cita(cmd), a.map(cita), { encoding: 'utf8', shell: true, ...o }) : spawnSync(cmd, a, { encoding: 'utf8', ...o })
 const existeCmd = (cmd, a = ['-version']) => { const r = corre(cmd, a); return !r.error && r.status === 0 }
 const winget = id => corre('winget', ['install', '-e', '--id', id, '--accept-package-agreements', '--accept-source-agreements'], { stdio: 'inherit' }).status === 0
 const brew = (...a) => corre('brew', a, { stdio: 'inherit' }).status === 0

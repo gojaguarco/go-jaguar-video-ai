@@ -1,4 +1,4 @@
-import { MIN_DUR, clipDur, compactTracks, duration, freeTrack, layout, overlayDur } from './timeline'
+import { MIN_DUR, acomodarTextos, clipDur, compactTracks, duration, freeTrack, layout, overlayDur } from './timeline'
 import { LIMITS, TRANSITION_DEFAULTS, ZOOM_DEFAULTS } from './fx'
 import type { Store } from './store'
 import {
@@ -9,7 +9,7 @@ import {
 
 /** Capa nueva sin id; el transform puede ser parcial. */
 export type NewLayer = (Layer extends infer L ? L extends Layer ? Omit<L, 'id' | 'transform'> & { transform?: Partial<Transform> } : never : never)
-export type OverlayPatch = { mascara?: { x: number; y: number; w: number; aspect: number; r: number } | null; transicion?: 'fundido' | 'subir' | '3d' | null; crop?: { l: number; t: number; r: number; b: number } | null; blend?: 'screen' | null; start?: number; track?: number; srcIn?: number; srcOut?: number; speed?: number; volume?: number; transform?: Partial<Transform> }
+export type OverlayPatch = { mascara?: { x: number; y: number; w: number; aspect: number; r: number } | null; transicion?: 'fundido' | 'subir' | '3d' | null; crop?: { l: number; t: number; r: number; b: number } | null; blend?: 'screen' | null; color?: Partial<ClipColor> | null; fundido?: { entrada?: number; salida?: number } | null; start?: number; track?: number; srcIn?: number; srcOut?: number; speed?: number; volume?: number; transform?: Partial<Transform> }
 export type LayerPatch = { transform?: Partial<Transform>; [k: string]: unknown }
 
 /**
@@ -23,6 +23,8 @@ export type Cmd =
   | { op: 'clip_to_overlay'; clip: string; start: number; track?: number }
   | { op: 'update_overlay'; id: string; patch: OverlayPatch }
   | { op: 'delete_overlay'; id: string }
+  | { op: 'split_overlay'; id: string; at: number }                               // corta un clip superpuesto (video o audio) en `at` (S)
+  | { op: 'trim_overlay'; id: string; lado: 'antes' | 'despues'; at: number }     // borra lo anterior (Q) o lo posterior (W) a `at` en un superpuesto
   | { op: 'set_track'; track: string; locked?: boolean; hidden?: boolean; muted?: boolean }
   | { op: 'set_zoom'; clip: string; zoom: ZoomFx | null }
   | { op: 'set_transition'; clip: string; transition: Transition | null }
@@ -41,7 +43,7 @@ export type Cmd =
   | { op: 'volume'; clip: string; value: number }
   | { op: 'move_clip'; id: string; to_index: number }
   | { op: 'trim'; id: string; edge: 'in' | 'out'; src_time: number }
-  | { op: 'add_text'; type: 'subtitle' | 'graphic'; start: number; end: number; text: string; x?: number; y?: number; size?: number; color?: string }
+  | { op: 'add_text'; type: 'subtitle' | 'graphic'; start: number; end: number; text: string; x?: number; y?: number; size?: number; color?: string; track?: number }
   | { op: 'add_layer'; layer: NewLayer }
   | { op: 'update_layer'; id: string; patch: LayerPatch }
   | { op: 'delete_layer'; id: string }
@@ -56,7 +58,7 @@ export const setAlComando = (fn: ((cmd: Cmd) => void) | null) => { alComando = f
 
 export function exec(store: Store, cmd: Cmd): string {
   let msg = 'sin cambios'
-  store.mutate(p => { msg = apply(store, p, cmd) })
+  store.mutate(p => { msg = apply(store, p, cmd); acomodarTextos(p) })
   alComando?.(cmd)
   return msg
 }
@@ -64,7 +66,7 @@ export function exec(store: Store, cmd: Cmd): string {
 /** Ejecuta varios comandos como UNA sola entrada de historial. */
 export function execBatch(store: Store, cmds: Cmd[]): string[] {
   const out: string[] = []
-  store.mutate(p => { for (const c of cmds) out.push(apply(store, p, c)) })
+  store.mutate(p => { for (const c of cmds) out.push(apply(store, p, c)); acomodarTextos(p) })     // al final del lote: los choques intermedios no cuentan
   if (alComando) for (const c of cmds) alComando(c)
   return out
 }
@@ -163,7 +165,20 @@ function apply(store: Store, p: Project, cmd: Cmd): string {
     case 'update_overlay': {
       const o = p.overlays?.find(x => x.id === cmd.id)
       if (!o) return 'clip superpuesto no encontrado'
-      const { transform, blend, crop, transicion, mascara, ...rest } = cmd.patch
+      const { transform, blend, crop, transicion, mascara, color, fundido, ...rest } = cmd.patch
+      if (fundido !== undefined) {
+        const f = { ...o.fundido, ...fundido }, d = overlayDur(o) / 2
+        const ent = clamp(f.entrada ?? 0, 0, d), sal = clamp(f.salida ?? 0, 0, d)
+        if (!fundido || (!ent && !sal)) delete o.fundido; else o.fundido = { ...(ent ? { entrada: ent } : {}), ...(sal ? { salida: sal } : {}) }
+      }
+      if (color !== undefined) {
+        if (!color) delete o.color
+        else {
+          const k = { ...CLIP_COLOR_DEFAULT, ...o.color, ...color }
+          k.brillo = clamp(k.brillo, 0.5, 1.8); k.contraste = clamp(k.contraste, 0.6, 1.6); k.saturacion = clamp(k.saturacion, 0, 2)
+          if (k.brillo === 1 && k.contraste === 1 && k.saturacion === 1) delete o.color; else o.color = k
+        }
+      }
       if (mascara !== undefined) { if (mascara) o.mascara = { x: clamp(mascara.x, 0, 1), y: clamp(mascara.y, 0, 1), w: clamp(mascara.w, 0.05, 1), aspect: clamp(mascara.aspect, 0.2, 5), r: clamp(mascara.r, 0, 0.5) }; else delete o.mascara }
       if (transicion !== undefined) { if (transicion) o.transicion = transicion; else delete o.transicion }
       const a = p.assets.find(x => x.id === o.assetId)
@@ -177,6 +192,22 @@ function apply(store: Store, p: Project, cmd: Cmd): string {
         o.track = freeTrack(p, o.kind, o.start, o.start + overlayDur(o), cmd.patch.track ?? o.track, o.id)   // si pisa a otro, se abre otra pista
       compactTracks(p)
       return `${o.id} actualizado (pista ${o.track}, ${f2(o.start)}s)`
+    }
+    case 'split_overlay': case 'trim_overlay': {
+      const o = p.overlays?.find(x => x.id === cmd.id)
+      if (!o) return 'clip superpuesto no encontrado'
+      const fin = o.start + overlayDur(o)
+      if (cmd.at <= o.start + MIN_DUR || cmd.at >= fin - MIN_DUR) return 'el cabezal no está dentro del clip'
+      const cut = o.srcIn + (cmd.at - o.start) * o.speed        // tiempo del archivo fuente en el punto de corte
+      if (cmd.op === 'trim_overlay') {
+        if (cmd.lado === 'antes') { o.srcIn = cut; o.start = cmd.at } else o.srcOut = cut      // sin cerrar el hueco: los superpuestos son libres en el tiempo
+        return `${o.id} recortado ${cmd.lado === 'antes' ? 'al inicio' : 'al final'} en ${f2(cmd.at)}s`
+      }
+      const b = { ...structuredClone(o), id: store.newId('o'), start: cmd.at, srcIn: cut }
+      o.srcOut = cut
+      if (o.fundido) { if (o.fundido.salida) { b.fundido = { salida: o.fundido.salida }; o.fundido = o.fundido.entrada ? { entrada: o.fundido.entrada } : undefined } else delete b.fundido; if (!o.fundido) delete o.fundido }
+      p.overlays!.splice(p.overlays!.indexOf(o) + 1, 0, b)
+      return `${o.id} cortado en ${f2(cmd.at)}s → ${b.id}`
     }
     case 'delete_overlay': {
       const n = p.overlays?.length ?? 0
@@ -344,6 +375,7 @@ function apply(store: Store, p: Project, cmd: Cmd): string {
         size: cmd.size ?? (sub ? 54 : 44),
         color: cmd.color ?? (sub ? '#ffffff' : '#ff3d6e'),
         transform: { ...DEFAULT_TRANSFORM, x: cmd.x ?? (sub ? 0.5 : 0.28), y: cmd.y ?? (sub ? 0.85 : 0.18) },
+        ...(cmd.track && cmd.track > 1 ? { track: cmd.track } : {}),       // si choca con otro, acomodarTextos lo pasa a una pista libre
       } as TextLayer
       p.layers.push(layer)
       store.selection = { type: 'layer', id: layer.id }

@@ -8,7 +8,7 @@ import { renderEditando } from './editando'
 import { api } from './api'
 import { bootRender } from './render'
 
-void document.fonts?.load('400 14px Figtree'); void document.fonts?.load('700 14px Figtree')
+void document.fonts?.load('400 14px Figtree'); void document.fonts?.load('700 14px Figtree'); void document.fonts?.load('900 14px Montserrat')
 const isEditor = (h: string) => h.startsWith('#/editor/')
 const renderMatch = /^#\/render\/([a-z0-9-]+)\?w=(\d+)&h=(\d+)/.exec(location.hash)   // página interna de la exportación (Chromium sin pantalla)
 const modeAtLoad = isEditor(location.hash)

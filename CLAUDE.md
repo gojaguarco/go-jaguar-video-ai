@@ -59,6 +59,15 @@ biblioteca/
 
 ## Procedimientos estándar de TODA edición
 **Antes de cortar, poner o borrar tomas: tiempos por palabra con la alineación por audio** (`node scripts/py.mjs --alinear scripts/alinear-palabras.py …`, guía 14), nunca con los tiempos crudos de Whisper; luego `verificar-sincronia.py`.
+
+### Rápido y con pocos tokens (medido en Windows; respétalo siempre)
+- **Alinea TODOS los videos en UNA llamada** (el modelo de ~1,2 GB se carga una vez): `node scripts/py.mjs --alinear scripts/alinear-palabras.py a.wav a.words.json a.palabras.json b.wav b.words.json b.palabras.json …` (4 videos: ~45 s en vez de ~2,5 min).
+- **Sincronía de subtítulos SIN exportar**: `node scripts/audio-linea.mjs <slug>` (audio de la línea de tiempo en <1 s) y `node scripts/py.mjs scripts/verificar-sincronia.py <ese.wav> biblioteca/proyectos/<slug>/proyecto.gojaguar` (Whisper se carga una vez para todas las ventanas: ~2 min). Lee también subtítulos de UNA palabra.
+- `analizar-color.py` tarda ~3–4 s por tramo: lánzalo para todos los clips en la MISMA orden de terminal, no uno por turno.
+- Revisa con `editor.verificar()` + `editor.hoja(0, [momentos])` (~4 s, una imagen) y `editor.describe('corto')`; nada de capturas sueltas ni exportaciones de prueba.
+- **Ojo con el inicio de los videos**: suele haber una cuenta "1, 2, 3" que Whisper NO transcribe (pone la primera palabra en 0 s). Corta siempre con los tiempos de `analisis/<video>.palabras.json` (alineados), no con los de `guion.json`.
+- **Tras cortar o borrar clips, recoloca los subtítulos**: no se mueven solos con un recorte hecho a mano y `delete_clip` puede borrar capas que lo tocan. Recalcula cada subtítulo desde `palabras.json` con los clips actuales (conserva los textos que el usuario cambió).
+- `py.mjs` ya añade `~/.gojaguar-bin` (whisper-cli) y WinGet\Links (ffmpeg) al PATH: no hace falta tocarlo a mano.
 Guion (lo revisa el usuario en la app), muletillas (`docs/guia/15-…`), voz limpia y pareja y luces/color (pasos `voz` y `color` de `.claude/skills/edicion-inicial/SKILL.md`). El estilo (`.claude/skills/estilos/`) se aplica encima.
 
 ## Ejecutar una orden del chat
